@@ -4,13 +4,13 @@ from datetime import datetime, timedelta, timezone
 # ====== CONFIG ======
 BUGZILLA_BASE = "https://bugzilla.mozilla.org"
 BUGZILLA_API_KEY = os.getenv("BlcgQ07cwYUdywCWCBqwQSuTH8Vq04yDEZ9XMzA7")  # opsional
-SINCE = "2020-01-01"      
+SINCE = "2024-01-01"      
 BY = "creation_time"       
 PER_PAGE = 200000              
 MAX_TOTAL = 10000000            
 PRODUCTS = [] 
 
-OUT_JSONL = "bugs.jsonl"
+OUT_JSONL = "bugzilla_bugs.jsonl"
 
 # ====== HELPERS ======
 def to_utc_iso_z(s):

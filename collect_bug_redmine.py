@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 # ====== CONFIG ======
 REDMINE_BASE = "https://www.redmine.org"                 
 REDMINE_API_KEY = os.getenv("")          
-SINCE = "2010-01-01"                                    
+SINCE = "2024-01-01"                                    
 BY = "updated_on"                                       
 PER_PAGE = 100                                          
 MAX_TOTAL = 1000000                                     
