@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 # ====== CONFIG ======
 GITHUB_API_BASE = "https://api.github.com"
-GITHUB_TOKEN = os.getenv("")          
+        
 OWNER_REPOS = json.loads(os.getenv("OWNER_REPOS", '["facebook/react"]'))
 SINCE = "2024-01-01"                              
 BY = "created_at"                                 
