@@ -1,2 +1,4 @@
 *.jsonl
 .env
+/easyfix_env
+/out_lda
