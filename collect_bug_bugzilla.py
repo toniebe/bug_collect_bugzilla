@@ -3,20 +3,20 @@ from datetime import datetime, timedelta, timezone
 
 # ====== CONFIG ======
 BUGZILLA_BASE = os.getenv("BUGZILLA_BASE", "https://bugzilla.mozilla.org")
-BUGZILLA_API_KEY = os.getenv("BlcgQ07cwYUdywCWCBqwQSuTH8Vq04yDEZ9XMzA7") 
-SINCE = os.getenv("SINCE", "2024-12-01")
+BUGZILLA_API_KEY = os.getenv("BUGZILLA_API_KEY", os.getenv("BlcgQ07cwYUdywCWCBqwQSuTH8Vq04yDEZ9XMzA7", ""))
+SINCE = os.getenv("SINCE", "2025-01-01")
 OUT_JSONL = os.getenv("OUT_JSONL", "bugzilla_bugs.jsonl")
-PRODUCTS = [p for p in os.getenv("PRODUCTS", "").split() if p] 
+PRODUCTS = [p for p in os.getenv("PRODUCTS", "").split() if p]
 
 PAGE_LIMIT = int(os.getenv("PAGE_LIMIT", "1000"))
-MAX_TOTAL = int(os.getenv("MAX_TOTAL", "100000"))
+MAX_TOTAL  = int(os.getenv("MAX_TOTAL",  "1000000"))
 
-# Enrichment limits
-FETCH_COMMENTS = True
-FETCH_ATTACHMENTS = True
-MAX_ATTACH_PER_BUG = int(os.getenv("MAX_ATTACH_PER_BUG", "2"))
-MAX_ATTACH_BYTES = int(os.getenv("MAX_ATTACH_BYTES", "100000")) 
-MAX_STACK_SNIPPETS = int(os.getenv("MAX_STACK_SNIPPETS", "2"))
+# Enrichment options
+FETCH_COMMENTS        = os.getenv("FETCH_COMMENTS", "1")
+FETCH_ATTACHMENTS     = os.getenv("FETCH_ATTACHMENTS", "1") 
+MAX_ATTACH_PER_BUG    = int(os.getenv("MAX_ATTACH_PER_BUG", "2"))
+MAX_ATTACH_BYTES      = int(os.getenv("MAX_ATTACH_BYTES", "200000"))
+FILTER_REQUIRE_COMMIT = os.getenv("FILTER_REQUIRE_COMMIT", "0")
 
 # ====== HELPERS ======
 def to_utc_iso_z(s):
@@ -63,7 +63,7 @@ def month_range(start_dt, end_dt):
         yield cur, min(nxt - timedelta(seconds=1), end_dt)
         cur = nxt
 
-# ====== FETCH LIST BUGS  ======
+# ====== FETCH BUG LIST ======
 def fetch_bugs_by_date():
     base_url = f"{BUGZILLA_BASE.rstrip('/')}/rest/bug"
     include_fields = [
@@ -116,7 +116,7 @@ def fetch_bugs_by_date():
             break
     return list(all_rows.values())
 
-# ====== KOMENTAR & ATTACHMENTS ======
+# ====== COMMENTS & ATTACHMENTS ======
 def fetch_comments(bug_id):
     url = f"{BUGZILLA_BASE.rstrip('/')}/rest/bug/{bug_id}/comment"
     params = {}
@@ -167,8 +167,7 @@ def fetch_attachment_data(attach_id):
             return raw[:MAX_ATTACH_BYTES]
     except Exception:
         pass
-
-    # fallback CGI raw
+    # 2) fallback CGI stream (binary)
     cgi = f"{BUGZILLA_BASE.rstrip('/')}/attachment.cgi"
     r = requests.get(cgi, params={"id": attach_id}, timeout=180, stream=True)
     r.raise_for_status()
@@ -180,46 +179,82 @@ def fetch_attachment_data(attach_id):
             break
     return buf
 
-# ====== EKSTRAK COMMIT & STACKTRACE ======
+# ====== EXTRACT COMMIT REFS & FILE CHANGES ======
 HG_COMMIT_URL = re.compile(r"https?://[\w\.\-]*hg\.mozilla\.org/\S*/rev/([0-9a-f]{8,40})", re.I)
 GH_COMMIT_URL = re.compile(r"https?://github\.com/\S+?/commit/([0-9a-f]{7,40})", re.I)
 CHANGESET_HASH = re.compile(r"\bchangeset[: ]+([0-9a-f]{7,40})\b", re.I)
 
 def extract_commit_refs(text):
     refs = set()
-    for m in HG_COMMIT_URL.finditer(text):
+    for m in HG_COMMIT_URL.finditer(text or ""):
         refs.add(m.group(0))
-    for m in GH_COMMIT_URL.finditer(text):
+    for m in GH_COMMIT_URL.finditer(text or ""):
         refs.add(m.group(0))
-    for m in CHANGESET_HASH.finditer(text):
+    for m in CHANGESET_HASH.finditer(text or ""):
         refs.add(m.group(1))
     return list(refs)
 
-STACK_HEAD = re.compile(r"(Traceback \(most recent call last\)|\bException\b|^\s*at\s+\S+|\bCaused by: )", re.I|re.M)
+# Diff/header patterns → nama file
+DIFF_GIT_FILE = re.compile(r"^diff --git a/(.+?) b/\1$", re.M)
+MINUS_FILE    = re.compile(r"^---\s+a/(.+)$", re.M)
+PLUS_FILE     = re.compile(r"^\+\+\+\s+b/(.+)$", re.M)
+INDEX_FILE    = re.compile(r"^Index:\s+(.+)$", re.M)
 
-def extract_stack_snippets(text, max_snips=MAX_STACK_SNIPPETS):
-    lines = text.splitlines()
-    snippets, cur = [], []
-    capturing = False
-    for ln in lines:
-        if STACK_HEAD.search(ln):
-            if capturing and cur:
-                snippets.append("\n".join(cur[:30]))
-                if len(snippets) >= max_snips: break
-                cur = []
-            capturing = True
-        if capturing:
-            cur.append(ln)
-            if len(cur) >= 60:
-                snippets.append("\n".join(cur[:30]))
-                if len(snippets) >= max_snips: break
-                cur, capturing = [], False
-    if capturing and cur and len(snippets) < max_snips:
-        snippets.append("\n".join(cur[:30]))
-    return snippets[:max_snips]
+# fallback: baris yang terlihat seperti path file kode
+CODE_FILE_EXTS = (
+    ".c",".cc",".cpp",".h",".hpp",".m",".mm",".java",".kt",".swift",
+    ".py",".js",".ts",".jsx",".tsx",".rb",".php",".cs",".go",".rs",
+    ".sh",".bash",".zsh",".ps1",".scala",".lua",".pl",".r",".mjs",
+    ".css",".scss",".less",".html",".xml",".yml",".yaml",".toml",".ini",".json",".proto"
+)
+LIKELY_PATH = re.compile(r"([A-Za-z0-9_\-./]+(?:%s))" % "|".join(re.escape(ext) for ext in CODE_FILE_EXTS))
+
+def extract_files_changed(text):
+    s = text or ""
+    files = set()
+
+    # diff --git a/x b/x
+    for m in DIFF_GIT_FILE.finditer(s):
+        files.add(m.group(1).strip())
+
+    # --- a/x  +++ b/x
+    minus = [m.group(1).strip() for m in MINUS_FILE.finditer(s)]
+    plus  = [m.group(1).strip() for m in PLUS_FILE.finditer(s)]
+    for name in minus + plus:
+        # --- /dev/null pada file baru
+        if name and name != "/dev/null":
+            files.add(name)
+
+    # Index: path
+    for m in INDEX_FILE.finditer(s):
+        files.add(m.group(1).strip())
+
+    # fallback
+    for m in LIKELY_PATH.finditer(s):
+        files.add(m.group(1).strip())
+
+    # Normalisasi kecil: hilangkan prefix a/ atau b/
+    norm = []
+    for f in files:
+        if f.startswith("a/") or f.startswith("b/"):
+            norm.append(f[2:])
+        else:
+            norm.append(f)
+    return sorted(set(norm))
+
+def looks_like_code_attachment(att):
+    name = (att.get("file_name") or "").lower()
+    ctype = (att.get("content_type") or "").lower()
+    if any(x in ctype for x in ("text", "log", "patch", "diff", "x-diff", "x-patch", "plain")):
+        return True
+    if name.endswith((".patch",".diff")):
+        return True
+    if name.endswith(CODE_FILE_EXTS):
+        return True
+    return False
 
 # ====== CLEANING ======
-def clean_bug(b, commit_refs=None, stack_snips=None):
+def clean_bug(b, commit_refs=None, files_changed=None):
     return {
         "id": int(b.get("id")),
         "summary": clean_text(b.get("summary")),
@@ -235,14 +270,15 @@ def clean_bug(b, commit_refs=None, stack_snips=None):
         "url": clean_text(b.get("url")),
         "depends_on": [int(x) for x in as_list(b.get("depends_on")) if as_int_or_none(x) is not None],
         "dupe_of": as_int_or_none(b.get("dupe_of")),
-        "commit_refs": sorted(list(set(commit_refs or []))),
-        "stacktrace_snippets": stack_snips or [],
+        "commit_refs": sorted(set(commit_refs or [])),
+        "files_changed": sorted(set(files_changed or [])),
     }
 
 def clean_dataset(rows):
     tmp = {}
     for b in rows:
-        if "id" not in b: continue
+        if "id" not in b: 
+            continue
         i = int(b.get("id"))
         old = tmp.get(i)
         if not old:
@@ -261,24 +297,21 @@ def save_jsonl(path, rows):
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 # ====== ENRICH ======
-def enrich_bug_with_commits_and_stack(bug):
+def enrich_bug_with_commits_and_files(bug):
     bid = int(bug["id"])
     commit_refs = set()
-    stack_snips = []
+    files_changed = set()
 
     if FETCH_COMMENTS:
         try:
             comments = fetch_comments(bid)
             for txt in comments:
                 commit_refs.update(extract_commit_refs(txt))
-                if len(stack_snips) < MAX_STACK_SNIPPETS:
-                    stack_snips.extend(
-                        extract_stack_snippets(txt, max_snips=MAX_STACK_SNIPPETS - len(stack_snips))
-                    )
+                files_changed.update(extract_files_changed(txt))
         except Exception as e:
             print(f"[warn] comments {bid} -> {e}")
 
-    if FETCH_ATTACHMENTS and len(stack_snips) < MAX_STACK_SNIPPETS:
+    if FETCH_ATTACHMENTS:
         try:
             metas = fetch_attachments_meta(bid)
             chosen = 0
@@ -287,27 +320,24 @@ def enrich_bug_with_commits_and_stack(bug):
                     break
                 if att.get("is_obsolete"):
                     continue
-                ctype = (att.get("content_type") or "").lower()
-                name  = (att.get("file_name") or "").lower()
-                if any(x in ctype for x in ["text", "log", "patch"]) or any(x in name for x in ["log", "stack", "trace", ".txt", ".patch", ".diff"]):
-                    raw = fetch_attachment_data(att["id"])
-                    if not raw:
-                        continue
-                    try:
-                        txt = raw.decode("utf-8", errors="replace")
-                    except Exception:
-                        txt = ""
-                    if txt:
-                        commit_refs.update(extract_commit_refs(txt))
-                        if len(stack_snips) < MAX_STACK_SNIPPETS:
-                            stack_snips.extend(
-                                extract_stack_snippets(txt, max_snips=MAX_STACK_SNIPPETS - len(stack_snips))
-                            )
-                        chosen += 1
+                if not looks_like_code_attachment(att):
+                    continue
+                raw = fetch_attachment_data(att["id"])
+                if not raw:
+                    continue
+                try:
+                    txt = raw.decode("utf-8", errors="replace")
+                except Exception:
+                    txt = ""
+                if not txt:
+                    continue
+                commit_refs.update(extract_commit_refs(txt))
+                files_changed.update(extract_files_changed(txt))
+                chosen += 1
         except Exception as e:
             print(f"[warn] attachments {bid} -> {e}")
 
-    return list(commit_refs), stack_snips[:MAX_STACK_SNIPPETS]
+    return list(commit_refs), list(files_changed)
 
 # ====== MAIN ======
 if __name__ == "__main__":
@@ -320,11 +350,18 @@ if __name__ == "__main__":
     enriched = []
     for i, b in enumerate(base_clean, 1):
         try:
-            commits, stacks = enrich_bug_with_commits_and_stack(b)
+            commits, files = enrich_bug_with_commits_and_files(b)
         except Exception as e:
             print(f"[warn] enrich bug {b.get('id')} -> {e}")
-            commits, stacks = [], []
-        cb = clean_bug(b, commit_refs=commits, stack_snips=stacks)
+            commits, files = [], []
+
+        # jika ingin hanya menyimpan bug yg punya commit refs, aktifkan FILTER_REQUIRE_COMMIT=1
+        if FILTER_REQUIRE_COMMIT and not commits:
+            if i % 100 == 0:
+                print(f"  skipped(no-commit) {i}/{len(base_clean)}")
+            continue
+
+        cb = clean_bug(b, commit_refs=commits, files_changed=files)
         enriched.append(cb)
         if i % 100 == 0:
             print(f"  enriched {i}/{len(base_clean)}")
