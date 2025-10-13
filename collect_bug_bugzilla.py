@@ -4,19 +4,26 @@ from datetime import datetime, timedelta, timezone
 # ====== CONFIG ======
 BUGZILLA_BASE = os.getenv("BUGZILLA_BASE", "https://bugzilla.mozilla.org")
 BUGZILLA_API_KEY = os.getenv("BUGZILLA_API_KEY", os.getenv("BlcgQ07cwYUdywCWCBqwQSuTH8Vq04yDEZ9XMzA7", ""))
-SINCE = os.getenv("SINCE", "2025-01-01")
-OUT_JSONL = os.getenv("OUT_JSONL", "bugzilla_bugs.jsonl")
-PRODUCTS = [p for p in os.getenv("PRODUCTS", "").split() if p]
+SINCE = os.getenv("SINCE", "2024-10-01")
 
+OUT_JSONL = os.getenv("OUT_JSONL", "bugzilla_bugs.jsonl")
+OUT_TRUNCATE = os.getenv("OUT_TRUNCATE", "1") in ("1","true","True")   # set 0 to append/resume
+RESUME_SKIP_IDS = os.getenv("RESUME_SKIP_IDS", "1") in ("1","true","True")  # read existing IDs to avoid duplicates
+
+PRODUCTS = [p for p in os.getenv("PRODUCTS", "").split() if p]
 PAGE_LIMIT = int(os.getenv("PAGE_LIMIT", "1000"))
 MAX_TOTAL  = int(os.getenv("MAX_TOTAL",  "1000000"))
 
 # Enrichment options
-FETCH_COMMENTS        = os.getenv("FETCH_COMMENTS", "1")
-FETCH_ATTACHMENTS     = os.getenv("FETCH_ATTACHMENTS", "1") 
+FETCH_COMMENTS        = os.getenv("FETCH_COMMENTS", "1") in ("1","true","True")
+FETCH_ATTACHMENTS     = os.getenv("FETCH_ATTACHMENTS", "1") in ("1","true","True")
 MAX_ATTACH_PER_BUG    = int(os.getenv("MAX_ATTACH_PER_BUG", "2"))
 MAX_ATTACH_BYTES      = int(os.getenv("MAX_ATTACH_BYTES", "200000"))
-FILTER_REQUIRE_COMMIT = os.getenv("FILTER_REQUIRE_COMMIT", "0")
+FILTER_REQUIRE_COMMIT = os.getenv("FILTER_REQUIRE_COMMIT", "0") in ("1","true","True")
+
+# Streaming save options
+SAVE_EVERY = int(os.getenv("SAVE_EVERY", "50"))  # flush every N
+DEDUP_IN_MEMORY = os.getenv("DEDUP_IN_MEMORY", "1") in ("1","true","True")
 
 # ====== HELPERS ======
 def to_utc_iso_z(s):
@@ -63,19 +70,18 @@ def month_range(start_dt, end_dt):
         yield cur, min(nxt - timedelta(seconds=1), end_dt)
         cur = nxt
 
-# ====== FETCH BUG LIST ======
-def fetch_bugs_by_date():
+# ====== FETCH BUG LIST (paged, yielded) ======
+def iter_bugs():
     base_url = f"{BUGZILLA_BASE.rstrip('/')}/rest/bug"
     include_fields = [
         "id","summary","status","resolution","product","component",
         "creation_time","last_change_time","creator","assigned_to",
         "keywords","url","depends_on","dupe_of"
     ]
-
     start_dt = datetime.fromisoformat(SINCE).replace(tzinfo=timezone.utc)
     end_dt   = datetime.now(timezone.utc)
+    yielded = 0
 
-    all_rows = {}
     for w_start, w_end in month_range(start_dt, end_dt):
         params = {
             "include_fields": include_fields,
@@ -104,17 +110,13 @@ def fetch_bugs_by_date():
             if not page:
                 break
             for b in page:
-                all_rows[b["id"]] = b
-                if len(all_rows) >= MAX_TOTAL:
-                    break
-            if len(all_rows) >= MAX_TOTAL:
-                break
+                yield b
+                yielded += 1
+                if yielded >= MAX_TOTAL:
+                    return
             if len(page) < params["limit"]:
                 break
             offset += params["limit"]
-        if len(all_rows) >= MAX_TOTAL:
-            break
-    return list(all_rows.values())
 
 # ====== COMMENTS & ATTACHMENTS ======
 def fetch_comments(bug_id):
@@ -167,7 +169,6 @@ def fetch_attachment_data(attach_id):
             return raw[:MAX_ATTACH_BYTES]
     except Exception:
         pass
-    # 2) fallback CGI stream (binary)
     cgi = f"{BUGZILLA_BASE.rstrip('/')}/attachment.cgi"
     r = requests.get(cgi, params={"id": attach_id}, timeout=180, stream=True)
     r.raise_for_status()
@@ -194,13 +195,11 @@ def extract_commit_refs(text):
         refs.add(m.group(1))
     return list(refs)
 
-# Diff/header patterns → nama file
 DIFF_GIT_FILE = re.compile(r"^diff --git a/(.+?) b/\1$", re.M)
 MINUS_FILE    = re.compile(r"^---\s+a/(.+)$", re.M)
 PLUS_FILE     = re.compile(r"^\+\+\+\s+b/(.+)$", re.M)
 INDEX_FILE    = re.compile(r"^Index:\s+(.+)$", re.M)
 
-# fallback: baris yang terlihat seperti path file kode
 CODE_FILE_EXTS = (
     ".c",".cc",".cpp",".h",".hpp",".m",".mm",".java",".kt",".swift",
     ".py",".js",".ts",".jsx",".tsx",".rb",".php",".cs",".go",".rs",
@@ -212,28 +211,17 @@ LIKELY_PATH = re.compile(r"([A-Za-z0-9_\-./]+(?:%s))" % "|".join(re.escape(ext) 
 def extract_files_changed(text):
     s = text or ""
     files = set()
-
-    # diff --git a/x b/x
     for m in DIFF_GIT_FILE.finditer(s):
         files.add(m.group(1).strip())
-
-    # --- a/x  +++ b/x
     minus = [m.group(1).strip() for m in MINUS_FILE.finditer(s)]
     plus  = [m.group(1).strip() for m in PLUS_FILE.finditer(s)]
     for name in minus + plus:
-        # --- /dev/null pada file baru
         if name and name != "/dev/null":
             files.add(name)
-
-    # Index: path
     for m in INDEX_FILE.finditer(s):
         files.add(m.group(1).strip())
-
-    # fallback
     for m in LIKELY_PATH.finditer(s):
         files.add(m.group(1).strip())
-
-    # Normalisasi kecil: hilangkan prefix a/ atau b/
     norm = []
     for f in files:
         if f.startswith("a/") or f.startswith("b/"):
@@ -274,29 +262,26 @@ def clean_bug(b, commit_refs=None, files_changed=None):
         "files_changed": sorted(set(files_changed or [])),
     }
 
-def clean_dataset(rows):
-    tmp = {}
-    for b in rows:
-        if "id" not in b: 
-            continue
-        i = int(b.get("id"))
-        old = tmp.get(i)
-        if not old:
-            tmp[i] = b
-        else:
-            if (b.get("last_change_time","") or "") > (old.get("last_change_time","") or ""):
-                tmp[i] = b
-    out = list(tmp.values())
-    out.sort(key=lambda x: x.get("creation_time",""))
-    return out
+# ====== STREAM SAVE ======
+def open_out():
+    mode = "w" if OUT_TRUNCATE else "a"
+    return open(OUT_JSONL, mode, encoding="utf-8")
 
-# ====== SAVE ======
-def save_jsonl(path, rows):
-    with open(path, "w", encoding="utf-8") as f:
-        for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+def load_existing_ids(path):
+    if not RESUME_SKIP_IDS or not os.path.exists(path):
+        return set()
+    seen = set()
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            try:
+                obj = json.loads(line)
+                if "id" in obj:
+                    seen.add(int(obj["id"]))
+            except Exception:
+                continue
+    return seen
 
-# ====== ENRICH ======
+# ====== ENRICH (per bug) ======
 def enrich_bug_with_commits_and_files(bug):
     bid = int(bug["id"])
     commit_refs = set()
@@ -339,33 +324,53 @@ def enrich_bug_with_commits_and_files(bug):
 
     return list(commit_refs), list(files_changed)
 
-# ====== MAIN ======
+# ====== MAIN (streaming) ======
 if __name__ == "__main__":
-    print(f"fetching since={SINCE} base={BUGZILLA_BASE} ...")
-    raw = fetch_bugs_by_date()
-    print("raw:", len(raw))
+    print(f"stream-fetch since={SINCE} base={BUGZILLA_BASE} -> {OUT_JSONL}")
+    seen_ids = load_existing_ids(OUT_JSONL) if not OUT_TRUNCATE else set()
+    if seen_ids:
+        print(f"[resume] skipping {len(seen_ids)} already-saved IDs")
 
-    base_clean = clean_dataset(raw)
+    written = 0
+    skipped = 0
+    flushed_since = 0
 
-    enriched = []
-    for i, b in enumerate(base_clean, 1):
-        try:
-            commits, files = enrich_bug_with_commits_and_files(b)
-        except Exception as e:
-            print(f"[warn] enrich bug {b.get('id')} -> {e}")
-            commits, files = [], []
+    with open_out() as fh:
+        for idx, raw_bug in enumerate(iter_bugs(), 1):
+            bid = int(raw_bug.get("id", 0) or 0)
+            if not bid:
+                continue
 
-        # jika ingin hanya menyimpan bug yg punya commit refs, aktifkan FILTER_REQUIRE_COMMIT=1
-        if FILTER_REQUIRE_COMMIT and not commits:
-            if i % 100 == 0:
-                print(f"  skipped(no-commit) {i}/{len(base_clean)}")
-            continue
+            if DEDUP_IN_MEMORY and bid in seen_ids:
+                skipped += 1
+                continue
 
-        cb = clean_bug(b, commit_refs=commits, files_changed=files)
-        enriched.append(cb)
-        if i % 100 == 0:
-            print(f"  enriched {i}/{len(base_clean)}")
+            # Enrich per bug, then write immediately
+            try:
+                commits, files = enrich_bug_with_commits_and_files(raw_bug)
+            except Exception as e:
+                print(f"[warn] enrich bug {bid} -> {e}")
+                commits, files = [], []
 
-    print("clean+enrich:", len(enriched))
-    save_jsonl(OUT_JSONL, enriched)
-    print("saved ->", OUT_JSONL)
+            if FILTER_REQUIRE_COMMIT and not commits:
+                skipped += 1
+                continue
+
+            obj = clean_bug(raw_bug, commit_refs=commits, files_changed=files)
+            fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            written += 1
+            flushed_since += 1
+            if DEDUP_IN_MEMORY:
+                seen_ids.add(bid)
+
+            if flushed_since >= SAVE_EVERY:
+                fh.flush()
+                os.fsync(fh.fileno())
+                print(f"[progress] fetched={idx} written={written} skipped={skipped}")
+                flushed_since = 0
+
+        # final flush
+        fh.flush()
+        os.fsync(fh.fileno())
+
+    print(f"done. written={written} skipped={skipped}")
