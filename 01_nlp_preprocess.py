@@ -86,7 +86,7 @@ def load_jsonl(path):
 
 def main():
     parser = argparse.ArgumentParser(description="NLP preprocessing for EasyFix bug reports")
-    parser.add_argument("--input", type=str, default="datasource/bugs.jsonl", help="Path to Bugzilla JSONL")
+    parser.add_argument("--input", type=str, default="datasource/bug_with_commit_messages.jsonl", help="Path to Bugzilla JSONL")
     parser.add_argument("--outdir", type=str, default="out_nlp", help="Output directory")
     parser.add_argument("--text-cols", type=str, default="summary,description", help="Comma-separated text columns to merge & clean")
     args = parser.parse_args()

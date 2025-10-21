@@ -1,4 +1,3 @@
-# enrich_bugzilla_no_args.py
 import os, re, json, time, requests
 from datetime import datetime, timezone
 
@@ -7,7 +6,7 @@ BUGZILLA_BASE    = os.getenv("BUGZILLA_BASE", "https://bugzilla.mozilla.org")
 BUGZILLA_API_KEY = os.getenv("BUGZILLA_API_KEY", "BlcgQ07cwYUdywCWCBqwQSuTH8Vq04yDEZ9XMzA7")
 
 IN_PATH   = os.getenv("IN_PATH",  "datasource/bugs.jsonl")        
-OUT_PATH  = os.getenv("OUT_PATH", "datasource/bug_enriched.jsonl")
+OUT_PATH  = os.getenv("OUT_PATH", "datasource/bug_enriched_commit_message.jsonl")
 SAVE_EVERY = int(os.getenv("SAVE_EVERY", "25"))
 RESUME     = os.getenv("RESUME", "1") not in ("0","false","False")
 
