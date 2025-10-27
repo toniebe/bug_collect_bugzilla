@@ -17,7 +17,7 @@ def log(msg: str):
     sys.stderr.flush()
 
 def gh_headers() -> Dict[str, str]:
-    hdr = {"Accept": "application/vnd.github+json", "User-Agent": "bug-filecode/1.1"}
+    hdr = {"Accept": "application/vnd.github+json", "User-Agent": "bug-filecode/1.2"}
     tok = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
     if tok:
         hdr["Authorization"] = f"Bearer {tok}"
@@ -32,10 +32,10 @@ def parse_github_commit(u: str) -> Optional[Tuple[str,str,str]]:
     return m.group(1), m.group(2), m.group(3)
 
 def parse_hg_commit(u: str) -> Optional[Tuple[str,str,str]]:
-    m = re.match(r"^https?://hg\.mozilla\.org/([^/]+(?:/[^/]+)*)/rev/([0-9a-f]+)$", u.strip())
+    m = re.match(r"^https?://hg(?:-edge)?\.mozilla\.org/([^/]+(?:/[^/]+)*)/rev/([0-9a-f]+)$", u.strip())
     if not m:
         return None
-    base = m.group(1)  
+    base = m.group(1)   
     node = m.group(2)
     return "https://hg.mozilla.org/" + base, base, node
 
@@ -54,9 +54,12 @@ def gh_repo_url(owner: str, repo: str) -> str:
     return f"https://github.com/{owner}/{repo}"
 
 # ---------- Mercurial (hg.mozilla.org) ----------
+def normalize_hg_base_url(base_url: str) -> str:
+    return base_url.replace("hg-edge.mozilla.org", "hg.mozilla.org")
+
 def hg_json_rev(base_url: str, node: str) -> Dict[str, Any]:
     url = f"{base_url}/json-rev/{node}"
-    r = requests.get(url, headers={"User-Agent": "bug-filecode/1.1"}, timeout=60)
+    r = requests.get(url, headers={"User-Agent": "bug-filecode/1.2"}, timeout=60)
     r.raise_for_status()
     return r.json()
 
@@ -67,8 +70,44 @@ def hg_raw_rev_url(base_url: str, node: str) -> str:
     return f"{base_url}/raw-rev/{node}"
 
 def hg_repo_url(base_name: str) -> str:
-    # base_name contoh: "integration/autoland", "mozilla-central", "comm-central"
     return f"https://hg.mozilla.org/{base_name}"
+
+def hg_fetch_files_meta(base_url: str, base_name: str, node: str) -> Tuple[List[Dict[str, Any]], str, str, str]:
+    base_url = normalize_hg_base_url(base_url)
+    changeset_patch_url = hg_raw_rev_url(base_url, node)
+
+    candidates = []
+    node_short = node[:12] if len(node) > 12 else node
+    for nd in (node, node_short):
+        candidates.append((base_url, nd))
+
+    for bu, nd in candidates:
+        try:
+            j = hg_json_rev(bu, nd)
+            files = j.get("files") or []
+            if files:
+                return files, bu, nd, changeset_patch_url
+        except requests.HTTPError as he:
+            # 404 → coba kandidat lain
+            if he.response is not None and he.response.status_code == 404:
+                continue
+            # error lain → lanjut kandidat lain
+            continue
+        except requests.RequestException:
+            continue
+
+    # Fallback: parse raw-rev untuk ambil file list
+    try:
+        diff_resp = requests.get(changeset_patch_url, headers={"User-Agent": "bug-filecode/1.2"}, timeout=60)
+        if diff_resp.status_code == 200:
+            diff = diff_resp.text
+            files = [{"file": m.group(1)} for m in re.finditer(r"^\+\+\+ b/(.+)$", diff, re.M)]
+            if files:
+                return files, base_url, node, changeset_patch_url
+    except Exception:
+        pass
+
+    return [], base_url, node, changeset_patch_url
 
 # ---------- Util struktur path ----------
 def split_path_info(path: str) -> Tuple[str, str, Optional[str]]:
@@ -98,13 +137,16 @@ def save_progress(state: Dict[str, Any]):
 # ====================================================
 def main():
     if not BUGS_IN_PATH.exists():
-        log(f"[ERROR] {BUGS_IN_PATH} tidak ditemukan.")
+        log(f"[ERROR] Input tidak ditemukan: {BUGS_IN_PATH}")
         sys.exit(1)
 
     state = load_progress()
     resume_line = int(state.get("next_line", 0))
     processed_since_save = 0
     total_processed = 0
+
+    BUGS_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with BUGS_IN_PATH.open("r", encoding="utf-8") as f_in, \
          BUGS_OUT_PATH.open("a", encoding="utf-8") as f_out:
@@ -128,10 +170,9 @@ def main():
             bug_id = bug.get("id")
             commit_refs: List[str] = bug.get("commit_refs") or []
 
-            # rakit file_code (gabungan semua commit_refs)
+
             file_code: List[Dict[str, Any]] = []
 
-            # GitHub
             for cref in commit_refs:
                 parsed = parse_github_commit(cref)
                 if not parsed:
@@ -159,16 +200,15 @@ def main():
 
                     file_code.append({
                         "system": "github",
-                        "repo": repo_id,          # e.g., mozilla/gecko-dev
-                        "repo_url": repo_url_,    # e.g., https://github.com/mozilla/gecko-dev
-                        "rev": sha,               # commit SHA
-                        "file_path": path,        # full path
-                        "dir": directory,         # directory path
-                        "filename": filename,     # leaf name
-                        "ext": ext,               # file extension (best-effort)
-                        "raw_url": raw_url,       # raw URL locked to SHA
-                        "blob_url": blob_url,     # pretty view in GH
-                        # info tambahan non-konten:
+                        "repo": repo_id,          
+                        "repo_url": repo_url_,    
+                        "rev": sha,              
+                        "file_path": path,       
+                        "dir": directory,        
+                        "filename": filename,     
+                        "ext": ext,              
+                        "raw_url": raw_url,
+                        "blob_url": blob_url,     
                         "status": finfo.get("status"),
                         "additions": finfo.get("additions"),
                         "deletions": finfo.get("deletions"),
@@ -181,18 +221,13 @@ def main():
                 if not parsed:
                     continue
                 base_url, base_name, node = parsed
-                repo_url_ = hg_repo_url(base_name)  # https://hg.mozilla.org/{base_name}
-                try:
-                    j = hg_json_rev(base_url, node)
-                except requests.HTTPError as he:
-                    log(f("[ERROR] bug {bug_id}: gagal hg {base_name}@{node}: {he}"))
-                    continue
-                except requests.RequestException as rexc:
-                    log(f"[ERROR] bug {bug_id}: network hg {base_name}@{node}: {rexc}")
-                    continue
+                repo_url_ = hg_repo_url(base_name)  
 
-                files = j.get("files") or []
-                changeset_patch_url = hg_raw_rev_url(base_url, node)
+
+                files, used_base_url, used_node, changeset_patch_url = hg_fetch_files_meta(base_url, base_name, node)
+                if not files:
+                    log(f"[WARN] bug {bug_id}: tidak bisa dapat file list untuk {base_name}@{node}")
+                    continue
 
                 for finfo in files:
                     if not isinstance(finfo, dict):
@@ -201,31 +236,28 @@ def main():
                     if not path:
                         continue
                     directory, filename, ext = split_path_info(path)
-                    raw_url = hg_raw_file_url(base_url, node, path)
+                    raw_url = hg_raw_file_url(used_base_url, used_node, path)
 
                     file_code.append({
                         "system": "hg",
-                        "repo": base_name,             # e.g., integration/autoland, mozilla-central, comm-central
-                        "repo_url": repo_url_,         # e.g., https://hg.mozilla.org/integration/autoland
-                        "rev": node,                   # changeset node
+                        "repo": base_name,            
+                        "repo_url": repo_url_,        
+                        "rev": used_node,             
                         "file_path": path,
                         "dir": directory,
                         "filename": filename,
                         "ext": ext,
-                        "raw_url": raw_url,            # raw URL locked ke changeset
-                        "changeset_patch_url": changeset_patch_url  # diff seluruh changeset (opsional)
+                        "raw_url": raw_url,            
+                        "changeset_patch_url": changeset_patch_url 
                     })
 
-            # hapus files_changed, ganti dengan file_code
             if "files_changed" in bug:
                 del bug["files_changed"]
             bug["file_code"] = file_code
 
-            # tulis baris bug baru
             f_out.write(json.dumps(bug, ensure_ascii=False) + "\n")
             f_out.flush()
 
-            # progress
             total_processed += 1
             processed_since_save += 1
             state["next_line"] = i + 1
@@ -235,7 +267,6 @@ def main():
                 log(f"[INFO] Autosave: next_line={state['next_line']} total={total_processed}")
                 processed_since_save = 0
 
-        # save akhir
         save_progress(state)
         log(f"[DONE] Selesai. next_line={state.get('next_line')} total={total_processed}")
 
