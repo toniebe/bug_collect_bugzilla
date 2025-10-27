@@ -6,7 +6,7 @@ BUGZILLA_BASE    = os.getenv("BUGZILLA_BASE", "https://bugzilla.mozilla.org")
 BUGZILLA_API_KEY = os.getenv("BUGZILLA_API_KEY", "BlcgQ07cwYUdywCWCBqwQSuTH8Vq04yDEZ9XMzA7")
 
 IN_PATH   = os.getenv("IN_PATH",  "datasource/bugs.jsonl")        
-OUT_PATH  = os.getenv("OUT_PATH", "datasource/bug_enriched_commit_message.jsonl")
+OUT_PATH  = os.getenv("OUT_PATH", "datasource/bug_new_commit_message.jsonl")
 SAVE_EVERY = int(os.getenv("SAVE_EVERY", "25"))
 RESUME     = os.getenv("RESUME", "1") not in ("0","false","False")
 
@@ -17,7 +17,6 @@ MAX_ATTACH_BYTES      = int(os.getenv("MAX_ATTACH_BYTES", "200000"))
 FILTER_REQUIRE_COMMIT = os.getenv("FILTER_REQUIRE_COMMIT","1") not in ("0","false","False")
 
 # ========= REGEX EKSTRAKSI =========
-# URL/hashes commit
 HG_COMMIT_URL  = re.compile(r"https?://[\w\.\-]*hg\.mozilla\.org/\S*/rev/([0-9a-f]{8,40})", re.I)
 GH_COMMIT_URL  = re.compile(r"https?://github\.com/\S+?/commit/([0-9a-f]{7,40})", re.I)
 CHANGESET_HASH = re.compile(r"\bchangeset[: ]+([0-9a-f]{7,40})\b", re.I)
@@ -30,21 +29,16 @@ def extract_commit_refs(text: str):
     for m in CHANGESET_HASH.finditer(s): refs.add(m.group(1))
     return refs
 
-# Pola pesan commit yang umum
 SUBJECT_LINE   = re.compile(r"^Subject:\s*(.+)$", re.I|re.M)
 BUG_TITLE_LINE = re.compile(r"\bBug\s+\d+\s*[-:]\s*(.+)", re.I)
-COMMIT_BLOCK   = re.compile(
-    r"(?m)^commit\s+[0-9a-f]{7,40}\s*$[\s\S]*?(?:\n\n([ \t].+?)(?:\n{2,}|\Z))"
-)
+COMMIT_BLOCK   = re.compile(r"(?m)^commit\s+[0-9a-f]{7,40}\s*$[\s\S]*?(?:\n\n([ \t].+?)(?:\n{2,}|\Z))")
 NON_URL_LINE   = re.compile(r"^\s*(?!https?://)\S.*$")
 
-# Diff/header patterns → nama file
 DIFF_GIT_FILE = re.compile(r"^diff --git a/(.+?) b/\1$", re.M)
 MINUS_FILE    = re.compile(r"^---\s+a/(.+)$", re.M)
 PLUS_FILE     = re.compile(r"^\+\+\+\s+b/(.+)$", re.M)
 INDEX_FILE    = re.compile(r"^Index:\s+(.+)$", re.M)
 
-# fallback: baris yang terlihat seperti path file kode
 CODE_FILE_EXTS = (
     ".c",".cc",".cpp",".h",".hpp",".m",".mm",".java",".kt",".swift",
     ".py",".js",".ts",".jsx",".tsx",".rb",".php",".cs",".go",".rs",
@@ -98,15 +92,49 @@ def append_jsonl(path, rows):
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
+# ========= HTTP helper (retry + skip 400) =========
+RETRY_STATUS = {429, 502, 503, 504}
+def _safe_get(url, params=None, timeout=120, stream=False, max_retry=1):
+    """
+    GET dengan retry untuk 429/5xx; jika 400 -> return None (skip).
+    Exception jaringan -> return None (skip).
+    """
+    params = params or {}
+    tries = 0
+    while True:
+        tries += 1
+        try:
+            r = requests.get(url, params=params, timeout=timeout, stream=stream)
+            # 400 → langsung skip (tanpa raise)
+            if r.status_code == 400:
+                return None
+            if r.status_code in RETRY_STATUS and tries <= max_retry + 1:
+                time.sleep(5)
+                continue
+            r.raise_for_status()
+            return r
+        except requests.exceptions.HTTPError as e:
+            # selain 400, kalau sudah melebihi retry—anggap gagal
+            if tries > max_retry + 1:
+                return None
+            # untuk 429/5xx sudah ditangani di atas; lainnya tidak otomatis retry
+            return None
+        except requests.exceptions.RequestException:
+            # jaringan error — skip
+            return None
+
 # ========= Bugzilla detail (komentar/attachment) =========
 def fetch_comments(bug_id: int):
     url = f"{BUGZILLA_BASE.rstrip('/')}/rest/bug/{bug_id}/comment"
     params = {"api_key": BUGZILLA_API_KEY} if BUGZILLA_API_KEY else {}
-    r = requests.get(url, params=params, timeout=120)
-    if r.status_code in (429,502,503,504):
-        time.sleep(5); r=requests.get(url, params=params, timeout=120)
-    r.raise_for_status()
-    data=r.json()
+    r = _safe_get(url, params=params, timeout=120)
+    if r is None:
+        # skip pada 400/exception
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        return []
     out=[]
     bug_node=(data.get("bugs") or {}).get(str(bug_id), {})
     for c in bug_node.get("comments", []) or []:
@@ -117,38 +145,46 @@ def fetch_comments(bug_id: int):
 def fetch_attachments_meta(bug_id: int):
     url = f"{BUGZILLA_BASE.rstrip('/')}/rest/bug/{bug_id}/attachment"
     params = {"api_key": BUGZILLA_API_KEY} if BUGZILLA_API_KEY else {}
-    r = requests.get(url, params=params, timeout=120)
-    if r.status_code in (429,502,503,504):
-        time.sleep(5); r=requests.get(url, params=params, timeout=120)
-    r.raise_for_status()
-    data=r.json()
+    r = _safe_get(url, params=params, timeout=120)
+    if r is None:
+        return []
+    try:
+        data=r.json()
+    except Exception:
+        return []
     return data.get("attachments", []) or []
 
 def fetch_attachment_data(attach_id: int):
-    # coba API JSON base64 dulu
+    # JSON base64 dulu
     url = f"{BUGZILLA_BASE.rstrip('/')}/rest/bug/attachment/{attach_id}"
     params = {"api_key": BUGZILLA_API_KEY} if BUGZILLA_API_KEY else {}
-    try:
-        r = requests.get(url, params=params, timeout=120)
-        r.raise_for_status()
-        data=r.json()
-        atts=data.get("attachments") or {}
-        att=atts.get(str(attach_id)) or {}
-        content=att.get("data")
-        if isinstance(content, str) and content:
-            import base64
-            raw=base64.b64decode(content, validate=False)
-            return raw[:MAX_ATTACH_BYTES]
-    except: pass
+    r = _safe_get(url, params=params, timeout=120)
+    if r is not None:
+        try:
+            data=r.json()
+            atts=data.get("attachments") or {}
+            att=atts.get(str(attach_id)) or {}
+            content=att.get("data")
+            if isinstance(content, str) and content:
+                import base64
+                raw=base64.b64decode(content, validate=False)
+                return raw[:MAX_ATTACH_BYTES]
+        except Exception:
+            pass
+
     # fallback: CGI (binary)
     cgi = f"{BUGZILLA_BASE.rstrip('/')}/attachment.cgi"
-    r = requests.get(cgi, params={"id": attach_id}, timeout=180, stream=True)
-    r.raise_for_status()
+    r = _safe_get(cgi, params={"id": attach_id}, timeout=180, stream=True)
+    if r is None:
+        return b""
     buf=b""
-    for chunk in r.iter_content(chunk_size=8192):
-        if not chunk: break
-        buf += chunk
-        if len(buf) > MAX_ATTACH_BYTES: break
+    try:
+        for chunk in r.iter_content(chunk_size=8192):
+            if not chunk: break
+            buf += chunk
+            if len(buf) > MAX_ATTACH_BYTES: break
+    except Exception:
+        return b""
     return buf
 
 # ========= Ekstraksi FILES =========
@@ -189,11 +225,9 @@ def extract_commit_messages(text: str):
     s = text or ""
     msgs = set()
 
-
     for m in SUBJECT_LINE.finditer(s):
         val = m.group(1).strip()
         if val: msgs.add(val)
-
 
     for m in BUG_TITLE_LINE.finditer(s):
         val = m.group(1).strip()
@@ -266,8 +300,10 @@ def clean_bug(b, commit_messages=None, commit_refs=None, files_changed=None):
 # ========= ENRICH =========
 def enrich_one(bug):
     bid = bug.get("id")
-    try: bid=int(bid)
-    except: return None
+    try:
+        bid=int(bid)
+    except:
+        return None
 
     commit_msgs=set()
     commit_refs=set()
@@ -299,7 +335,8 @@ def enrich_one(bug):
                 if not raw: continue
                 try:
                     txt=raw.decode("utf-8", errors="replace")
-                except: txt=""
+                except:
+                    txt=""
                 if not txt: continue
                 commit_msgs.update(extract_commit_messages(txt))
                 commit_refs.update(extract_commit_refs(txt))
@@ -314,6 +351,7 @@ def enrich_one(bug):
         commit_refs=list(commit_refs),
         files_changed=list(files)
     )
+    # jika tidak ada commit message / ref → skip (langsung lanjut)
     if FILTER_REQUIRE_COMMIT and not (out["commit_messages"] or out["commit_refs"]):
         return None
     return out
@@ -323,7 +361,6 @@ if __name__ == "__main__":
     if not os.path.exists(IN_PATH):
         raise SystemExit(f"input missing: {IN_PATH}")
 
-    # resume: skip id yang sudah ada di OUT_PATH
     already = iter_existing_ids(OUT_PATH) if RESUME else set()
     if RESUME:
         print(f"[resume] skipping {len(already)} existing IDs in {OUT_PATH}")
@@ -332,14 +369,21 @@ if __name__ == "__main__":
     for bug in load_input(IN_PATH):
         total += 1
         bid = bug.get("id")
-        try: bid_int=int(bid)
-        except: continue
-        if bid_int in already: continue
+        try:
+            bid_int=int(bid)
+        except:
+            continue
+        if bid_int in already:
+            continue
 
-        out = enrich_one(bug)
-        if out is None:
-            pass
-        else:
+        try:
+            out = enrich_one(bug)
+        except Exception as e:
+            # guard terakhir: jika enrich_one gagal, skip bug ini
+            print(f"[warn] enrich {bid_int} -> {e}")
+            out = None
+
+        if out is not None:
             buf.append(out); written += 1
 
         if len(buf) >= SAVE_EVERY:
