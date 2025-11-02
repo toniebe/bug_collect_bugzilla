@@ -1,0 +1,46 @@
+[2025-10-12T14:29:13Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:29:13Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:29:13Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:36:13Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:36:13Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:36:13Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:43:39Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:43:39Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:43:39Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:51:28Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:51:28Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:51:28Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:55:04Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:55:04Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:55:04Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:55:12Z] === Pipeline finished successfully ===
+[2025-10-12T14:56:04Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:56:04Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:56:04Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:56:22Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T14:56:22Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T14:56:22Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T14:57:24Z] === Pipeline finished successfully ===
+[2025-10-12T15:15:38Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T15:15:38Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T15:15:38Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T15:15:38Z] [LDA] Skipped: found out_lda/lda_sklearn_model_meta.npz
+[2025-10-12T15:15:38Z] [CLEAN] Running 03_clean_topics.py in-process…
+[2025-10-12T15:15:39Z] [ERROR] Cleaning step failed: '["topic_id", "topic_label"]'
+[2025-10-12T15:15:39Z] === Pipeline finished successfully ===
+[2025-10-12T15:15:39Z] === Pipeline finished successfully ===
+[2025-10-12T15:18:26Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T15:18:26Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T15:18:26Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T15:18:26Z] [LDA] Skipped: found out_lda/lda_sklearn_model_meta.npz
+[2025-10-12T15:18:26Z] [CLEAN] Running 03_clean_topics.py in-process…
+[2025-10-12T15:18:27Z] [WARN] Missing 03_clean_topics.py — skipping cleaning step
+[2025-10-12T15:18:27Z] === Pipeline finished successfully ===
+[2025-10-12T15:22:35Z] === Pipeline started (log: log_2025-10-12.txt) ===
+[2025-10-12T15:22:35Z] [NLP] Skipped: found out_nlp/bugs_clean.csv
+[2025-10-12T15:22:35Z] [LDA] Running 02_lda_topics.py in-process…
+[2025-10-12T15:22:35Z] [LDA] Skipped: found out_lda/lda_sklearn_model_meta.npz
+[2025-10-12T15:22:35Z] [CLEAN] Running 03_clean_topics.py in-process…
+[2025-10-12T15:22:35Z] [DEBUG] HERE=/Users/dartikaanie/SMART SYSTEM/SEMESTER II/PRAKTIKUM/bugLocalization, clean_script=/Users/dartikaanie/SMART SYSTEM/SEMESTER II/PRAKTIKUM/bugLocalization/03_clean_topics.py, exists=True
+[2025-10-12T15:22:35Z] [WARN] Missing 03_clean_topics.py — skipping cleaning step
+[2025-10-12T15:22:35Z] === Pipeline finished successfully ===
