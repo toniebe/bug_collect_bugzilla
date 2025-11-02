@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 01_nlp_preprocess.py
-- Load Bugzilla JSONL (e.g., datasource/bugs.jsonl)
+- Load Bugzilla JSONL (e.g., datasource/bugs2.jsonl)
 - Clean & normalize text (summary/description)
 - Output a CSV with clean_text and essential metadata for later modeling.
 """
@@ -11,6 +11,35 @@ import os, re, string, json, argparse, warnings
 import pandas as pd
 
 warnings.filterwarnings("ignore", category=FutureWarning)
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# --- try load .env (biar sama dgn main.py) ---
+def load_env():
+    loaded = False
+    try:
+        from dotenv import load_dotenv
+        # coba di CWD
+        load_dotenv()
+        # coba di folder file ini
+        load_dotenv(os.path.join(HERE, ".env"))
+        loaded = True
+    except Exception:
+        pass
+    if not loaded:
+        # fallback: baca manual .env di folder ini kalau ada
+        env_path = os.path.join(HERE, ".env")
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+
+load_env()
+
 
 # ---------- NLP Utilities ----------
 
@@ -72,6 +101,8 @@ def clean_text(text, sw):
     tokens = [t for t in tokens if ok(t)]
     return " ".join(tokens)
 
+
+
 # ---------- IO ----------
 
 def load_jsonl(path):
@@ -79,16 +110,47 @@ def load_jsonl(path):
     with open(path, "r", encoding="utf-8") as f:
         for line in f:
             line=line.strip()
-            if not line: 
+            if not line:
                 continue
             rows.append(json.loads(line))
     return pd.DataFrame(rows)
 
+
+def flatten_value(val):
+    """
+    Bugzilla new structure has list fields (commit_messages, commit_refs, files_changed, keywords, depends_on).
+    This helper will make them joinable.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        # convert every item to str, then join
+        return " ".join(str(x) for x in val if x is not None)
+    # for non-list, just cast to str
+    return str(val)
+
+
+def list_to_semicolon(val):
+    """
+    For saving into CSV: keep list columns readable.
+    """
+    if isinstance(val, list):
+        return ";".join(str(x) for x in val)
+    return val
+
+
+
 def main():
     parser = argparse.ArgumentParser(description="NLP preprocessing for EasyFix bug reports")
-    parser.add_argument("--input", type=str, default="datasource/bugs.jsonl", help="Path to Bugzilla JSONL")
-    parser.add_argument("--outdir", type=str, default="out_nlp", help="Output directory")
-    parser.add_argument("--text-cols", type=str, default="summary,description", help="Comma-separated text columns to merge & clean")
+    # DEFAULT_DATASOURCE diambil dari .env atau fallback
+    parser.add_argument("--input", type=str, default=os.getenv("DATASOURCE", "datasource/bugs2.jsonl"), help="Path to Bugzilla JSONL")
+    parser.add_argument("--outdir", type=str, default=os.getenv("PATH_NLP_OUT", "out_nlp"), help="Output directory")
+    parser.add_argument(
+        "--text-cols",
+        type=str,
+        default=os.getenv("NLP_TEXT_COLS", "summary,product,component,commit_messages,files_changed"),
+        help="Comma-separated text columns to merge & clean"
+    )
     args = parser.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
@@ -96,8 +158,29 @@ def main():
     print(f"[NLP] Loading: {args.input}")
     df = load_jsonl(args.input)
 
+    base_cols = [
+        "id",
+        "summary",
+        "creator",
+        "assigned_to",
+        "status",
+        "resolution",
+        "creation_time",
+        "last_change_time",
+        # new fields from your example
+        "product",
+        "component",
+        "keywords",
+        "depends_on",
+        "dupe_of",
+        "commit_messages",
+        "commit_refs",
+        "files_changed",
+        "url",
+    ]
+    
     # Ensure key cols exist
-    for col in ["id","summary","creator","assigned_to","status","resolution","creation_time","last_change_time"]:
+    for col in base_cols:
         if col not in df.columns:
             df[col] = None
 
@@ -112,23 +195,67 @@ def main():
     for _, row in df.iterrows():
         chunks = []
         for c in text_cols:
-            if c in df.columns and isinstance(row.get(c), str) and row.get(c):
-                chunks.append(row.get(c))
+            if c not in df.columns:
+                continue
+            val = row.get(c)
+            if val is None:
+                continue
+            # handle list vs string
+            if isinstance(val, str):
+                if val.strip():
+                    chunks.append(val)
+            elif isinstance(val, list):
+                flat = flatten_value(val)
+                if flat.strip():
+                    chunks.append(flat)
+            else:
+                flat = str(val)
+                if flat.strip():
+                    chunks.append(flat)
+
+        # fallback: at least summary
         if not chunks and isinstance(row.get("summary"), str):
             chunks = [row.get("summary")]
+
         raw = " ".join(chunks)
         clean_texts.append(clean_text(raw, sw))
 
     out = df.copy()
     out["clean_text"] = clean_texts
 
+    # convert list-ish cols so CSV tetap enak dibaca
+    for col in ["keywords", "depends_on", "commit_messages", "commit_refs", "files_changed"]:
+        if col in out.columns:
+            out[col] = out[col].apply(list_to_semicolon)
+
     # Save a compact modeling table
-    cols = ["id", "clean_text", "summary", "creator", "assigned_to", "status", "resolution", "creation_time", "last_change_time"]
+    cols = [
+        "id",
+        "clean_text",
+        "summary",
+        "product",
+        "component",
+        "creator",
+        "assigned_to",
+        "status",
+        "resolution",
+        "creation_time",
+        "last_change_time",
+        "keywords",
+        "depends_on",
+        "dupe_of",
+        "commit_messages",
+        "commit_refs",
+        "files_changed",
+        "url",
+    ]
     for c in cols:
         if c not in out.columns:
             out[c] = None
-    out[cols].to_csv(os.path.join(args.outdir, "bugs_clean.csv"), index=False)
-    print(f"[NLP] Wrote {os.path.join(args.outdir,'bugs_clean.csv')}")
+
+    out_path = os.path.join(args.outdir, "bugs_clean.csv")
+    out[cols].to_csv(out_path, index=False)
+    print(f"[NLP] Wrote {out_path}")
 
 if __name__ == "__main__":
     main()
