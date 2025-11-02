@@ -2,3 +2,11 @@
 .env
 /easyfix_env
 /out_lda
+/out_lda_old2
+/out_nlp
+/out_nlp_old
+/log
+/database
+/__pycache__
+log_*
+out_lda_old.zip
