@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import requests
 
-# ====== PATH & KONFIG (tanpa argumen) ======
+
 BUGS_IN_PATH        = Path("bugs2.jsonl")
 BUGS_OUT_PATH       = Path("datasource/bugs.with_file_code.jsonl")
 PROGRESS_PATH       = Path("datasource/.progress.json")
@@ -25,7 +25,6 @@ def gh_headers() -> Dict[str, str]:
 
 # ---------- Parser commit refs ----------
 def parse_github_commit(u: str) -> Optional[Tuple[str,str,str]]:
-    # https://github.com/{owner}/{repo}/commit/{sha}
     m = re.match(r"^https?://github\.com/([^/]+)/([^/]+)/commit/([0-9a-f]{7,40})$", u.strip())
     if not m:
         return None
@@ -111,7 +110,6 @@ def hg_fetch_files_meta(base_url: str, base_name: str, node: str) -> Tuple[List[
 
 # ---------- Util struktur path ----------
 def split_path_info(path: str) -> Tuple[str, str, Optional[str]]:
-    # return (dir, filename, ext)
     parts = path.split("/")
     filename = parts[-1] if parts else path
     directory = "/".join(parts[:-1]) if len(parts) > 1 else ""

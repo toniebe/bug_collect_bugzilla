@@ -4,11 +4,19 @@
 dikarenakan json beberapa repository memiliki file yang besar tidak dapat di push silahkan akses disini [drive](https://drive.google.com/drive/folders/1PjER9uZCddyRLEw0mM-5joLgpwEcprV9?usp=sharing)
 
 ## run
-`python bug_collect_{provide}`
-## provide
-- Bugzilla
-- Github
-- Redmine
+````
+Collect Data JSON
+→ [collect_bug_bugzilla.py] → Collecting data from bugzilla since date input
+→ [enrich_bugzilla_from_file.py] → Enrich data from bug.jsonl for collecting commit message
+→ [filter_commit_messages.py] → For filter data with commit message
+````
+## output data
+````
+Result JSON
+→ [collect_bug_bugzilla.py] → datasource/bugs.jsonl
+→ [enrich_bugzilla_from_file.py] → datasource/bugs.with_file_code.jsonl
+→ [filter_commit_messages.py] → datasource/bug_with_commit_messages.jsonl
+````
 
 #### addition by DARA
 
